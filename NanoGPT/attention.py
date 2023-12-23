@@ -1,23 +1,28 @@
 """
 [Dataset] https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 """
-
+import time 
 import torch 
 import torch.nn as nn
 from torch.nn import functional as F 
 
 # Hyperparameters
-batch_size = 32 
-block_size = 8 
+batch_size = 64 
+block_size = 256 
 max_iter = 5000 
 eval_interval = 500 
-learning_rate = 1e-3 
+learning_rate = 3e-4 
+eval_iters = 200 
+n_embed = 384
+n_heads = 6
+n_layer = 6
+dropout = 0.2
+
+torch.manual_seed(1337)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device: ",device)
-eval_iters = 200 
-torch.manual_seed(1337)
-n_embed = 32
 
+# Read Shakespeare Dataset 
 with open('dataset/input.txt','r',encoding='utf-8') as f:
     text = f.read()
 
@@ -76,6 +81,8 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size,block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self,x):
         B,T,C = x.shape
         k = self.key(x)   # B,T,C
@@ -85,6 +92,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2,-1) * C**-0.5 # (BTC) @ (BCT) --> (BTT)
         wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf')) # BTT
         wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
 
         # Perform weighted aggregation of values
         v = self.value(x)
@@ -99,12 +107,15 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads) ])
         self.proj = nn.Linear(n_embed, n_embed)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        mha = torch.cat([h(x) for h in self.heads], dim=-1) 
+        out = torch.cat([h(x) for h in self.heads], dim=-1) 
         # Concat happens in the channels dim and n_heads are adjusted while calling to accomodate
-        mha = self.proj(mha)
-        return mha
+        out = self.proj(out)
+        out = self.dropout(out)
+
+        return out
 
 
 class FeedForward(nn.Module):
@@ -115,11 +126,13 @@ class FeedForward(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(n_embed, 4 * n_embed),
             nn.ReLU(),
-            nn.Linear(4 * n_embed,n_embed)
+            nn.Linear(4 * n_embed,n_embed),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
-        return self.net(x)
+        out = self.net(x)
+        return out 
 
 """
 Making a decoder block for self attention
@@ -150,12 +163,10 @@ class GPTLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.blocks = nn.Sequential(
-            Block(n_embed, n_heads=4),
-            Block(n_embed, n_heads=4),
-            Block(n_embed, n_heads=4),
-            nn.LayerNorm(n_embed),
-            )
+
+        self.blocks = nn.Sequential(*[Block(n_embed, n_heads=n_heads) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embed)
+        
         self.lm_head = nn.Linear(n_embed,vocab_size)
 
     def forward(self, idx, targets=None):
@@ -200,16 +211,22 @@ class GPTLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next),dim=1) #(B,T+1)
         return idx 
     
-model = GPTLanguageModel()
-m = model.to(device)
+model = GPTLanguageModel().to(device)
+# m = model.to(device)
 
 
 # Optimizer
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
+
 for iter in range(max_iter):
 
+    start_time = time.time()
+    
+
+    print(f'Running Iteration {iter} of {max_iter}  |  ', end="\r")
+    
     # every once in a while evaluate the loss on train and val sets
     if iter % eval_interval == 0:
         losses = estimate_loss()
@@ -223,6 +240,10 @@ for iter in range(max_iter):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f'total time taken for iteration {iter} : {elapsed} seconds  |  ', end="\t")
 
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
