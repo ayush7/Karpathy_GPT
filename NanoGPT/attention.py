@@ -9,10 +9,11 @@ from torch.nn import functional as F
 # Hyperparameters
 batch_size = 32 
 block_size = 8 
-max_iter = 3000 
-eval_interval = 300 
-learning_rate = 1e-2 
+max_iter = 5000 
+eval_interval = 500 
+learning_rate = 1e-3 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Using device: ",device)
 eval_iters = 200 
 torch.manual_seed(1337)
 n_embed = 32
@@ -62,27 +63,110 @@ def estimate_loss():
     model.train()
     return out 
 
+"""
+Self Attention Module
 
 """
-The Bigram Language Model Class
+class Head(nn.Module):
+    """ One head of self-attention"""
+    def __init__(self, head_size):
+        super().__init__()
+        self.key   = nn.Linear(n_embed, head_size, bias=False)
+        self.value = nn.Linear(n_embed, head_size, bias=False)
+        self.query = nn.Linear(n_embed, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size,block_size)))
+
+    def forward(self,x):
+        B,T,C = x.shape
+        k = self.key(x)   # B,T,C
+        q = self.query(x) # B,T,C
+
+        # Compute attention score (affinities)
+        wei = q @ k.transpose(-2,-1) * C**-0.5 # (BTC) @ (BCT) --> (BTT)
+        wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf')) # BTT
+        wei = F.softmax(wei, dim=-1)
+
+        # Perform weighted aggregation of values
+        v = self.value(x)
+        out = wei @ v 
+        return out 
+"""
+Implement Multi Head Attention
+"""
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, n_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads) ])
+        self.proj = nn.Linear(n_embed, n_embed)
+
+    def forward(self, x):
+        mha = torch.cat([h(x) for h in self.heads], dim=-1) 
+        # Concat happens in the channels dim and n_heads are adjusted while calling to accomodate
+        mha = self.proj(mha)
+        return mha
+
+
+class FeedForward(nn.Module):
+    """Simple feed forward network with an activation"""
+
+    def __init__(self, n_embed):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, 4 * n_embed),
+            nn.ReLU(),
+            nn.Linear(4 * n_embed,n_embed)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 """
-class BigramLanguageModel(nn.Module):
+Making a decoder block for self attention
+"""
+
+class Block(nn.Module):
+    """ Block : Communication followed by computation [thinking]"""
+    def __init__(self, n_embed, n_heads):
+        super().__init__()
+        head_size = n_embed//n_heads
+        self.sa = MultiHeadAttention(n_heads, head_size)
+        self.ff = FeedForward(n_embed)
+        self.layer_norm1 = nn.LayerNorm(n_embed)
+        self.layer_norm2 = nn.LayerNorm(n_embed)
+    
+    def forward(self,x):
+        x = x + self.sa(self.layer_norm1(x))
+        x = x + self.ff(self.layer_norm2(x))
+        return x
+
+
+"""
+The GPT Language Model Class
+
+"""
+class GPTLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
+        self.blocks = nn.Sequential(
+            Block(n_embed, n_heads=4),
+            Block(n_embed, n_heads=4),
+            Block(n_embed, n_heads=4),
+            nn.LayerNorm(n_embed),
+            )
         self.lm_head = nn.Linear(n_embed,vocab_size)
 
     def forward(self, idx, targets=None):
-        B, T = idx.shape 
+        B,T = idx.shape 
 
-        
         # idx and targets are both B,T tensor of integers
         tok_emb = self.token_embedding_table(idx)                                # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T,C)
         x = tok_emb + pos_emb                                                    # (B,T,C)
-        logits = self.lm_head(tok_emb)                                           # (B,T,vocab_size)
+        x = self.blocks(x)
+        logits = self.lm_head(x)                                           # (B,T,vocab_size)
 
         # logits = self.token_embedding_table(idx)  # Batch, Time(block size), Channel(vocab size) = BTC
         if targets is None:
@@ -102,8 +186,10 @@ class BigramLanguageModel(nn.Module):
         # idx is (B, T) array of indices in the current context
 
         for _ in range(max_new_tokens):
+            # crop the idx to prevent scope errors
+            idx_cond = idx[:, -block_size:]
             # get prediction
-            logits, loss = self(idx)
+            logits, loss = self(idx_cond)
             #focus only on the last time step
             logits = logits[:,-1,:] #becomes (B,C)
             #apply softmax to get probabilities
@@ -114,7 +200,7 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next),dim=1) #(B,T+1)
         return idx 
     
-model = BigramLanguageModel()
+model = GPTLanguageModel()
 m = model.to(device)
 
 
