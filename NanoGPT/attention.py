@@ -245,6 +245,10 @@ for iter in range(max_iter):
     elapsed = end_time - start_time
     print(f'total time taken for iteration {iter} : {elapsed} seconds  |  ', end="\t")
 
+
+
+
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+
